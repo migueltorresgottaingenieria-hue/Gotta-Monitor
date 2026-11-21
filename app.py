@@ -4,7 +4,7 @@ import pandas as pd
 import io
 import plotly.express as px
 
-from gmail_helper import find_latest_xlsx
+import gmail_helper
 
 
 # ==================================================
@@ -17,6 +17,57 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# Compatibilidad con la versión de escritorio
+find_latest_xlsx = getattr(gmail_helper, "find_latest_xlsx", None)
+
+# Funciones adicionales necesarias para OAuth en Streamlit Cloud
+get_authorization_url = getattr(
+    gmail_helper, "get_authorization_url", None
+)
+exchange_code = getattr(
+    gmail_helper, "exchange_code", None
+)
+
+
+# ==================================================
+# AUTORIZACION GOOGLE OAUTH - VERSION WEB
+# ==================================================
+
+# Procesar respuesta de Google después de autorizar la cuenta
+try:
+    query_params = st.query_params
+
+    oauth_code = query_params.get("code")
+    oauth_state = query_params.get("state")
+    oauth_error = query_params.get("error")
+
+    if oauth_error:
+        st.session_state["gmail_oauth_error"] = str(oauth_error)
+        st.query_params.clear()
+
+    elif oauth_code and oauth_state:
+
+        if exchange_code is None:
+            st.session_state["gmail_oauth_error"] = (
+                "Tu gmail_helper.py no tiene configurada "
+                "la función exchange_code."
+            )
+            st.query_params.clear()
+
+        else:
+            exchange_code(oauth_code, oauth_state)
+            st.session_state["gmail_authorized"] = True
+            st.session_state.pop("gmail_oauth_error", None)
+            st.query_params.clear()
+            st.rerun()
+
+except Exception as error:
+    st.session_state["gmail_oauth_error"] = str(error)
+    try:
+        st.query_params.clear()
+    except Exception:
+        pass
 
 
 # ==================================================
@@ -136,8 +187,6 @@ st.markdown("""
         scroll-margin-top: 20px;
     }
 
-    /* ADAPTACION PARA CELULARES */
-
     @media (max-width: 768px) {
 
         .main-title {
@@ -191,6 +240,9 @@ st.markdown("""
 def normalize_text(value):
 
     if value is None:
+        return ""
+
+    if pd.isna(value):
         return ""
 
     value = str(value).strip().lower()
@@ -249,7 +301,6 @@ def find_column(columns, possible_names, exact_only=False):
         normalize_text(col): col for col in columns
     }
 
-    # Coincidencias exactas
     for name in possible_names:
 
         normalized_name = normalize_text(name)
@@ -260,7 +311,6 @@ def find_column(columns, possible_names, exact_only=False):
     if exact_only:
         return None
 
-    # Coincidencias parciales
     for col in columns:
 
         normalized_col = normalize_text(col)
@@ -311,9 +361,7 @@ def load_excel_file(file_bytes):
             break
 
     if sheet_name is None:
-
         st.error("No se encontró la hoja 'Resumen' en el archivo.")
-
         return None, None
 
     header_row = find_header_row(
@@ -328,10 +376,8 @@ def load_excel_file(file_bytes):
     )
 
     df = df.dropna(how="all")
-
     df = fix_column_names(df)
 
-    # Corregir textos de las celdas
     for column in df.select_dtypes(include=["object"]).columns:
         df[column] = df[column].apply(fix_encoding)
 
@@ -341,9 +387,7 @@ def load_excel_file(file_bytes):
     )
 
     if station_col is None:
-
         st.error("No se encontró la columna de estaciones.")
-
         return None, None
 
     df = df[df[station_col].notna()].copy()
@@ -370,29 +414,29 @@ def to_number(value):
         return 0
 
 
-def classify_status(status_value, error_value=None, warning_value=None):
+def classify_status(
+    status_value,
+    error_value=None,
+    warning_value=None
+):
 
     status = normalize_text(status_value).upper()
 
     errors = to_number(error_value)
     warnings = to_number(warning_value)
 
-    # PRIORIDAD 1: CUALQUIER ERROR REGISTRADO
     if errors > 0:
         return "ERROR"
 
-    # PRIORIDAD 2: ESTADO DE ERROR
     if any(word in status for word in ["ERROR", "FALLA", "FAIL"]):
         return "ERROR"
 
-    # PRIORIDAD 3: ESTADO REVISAR
     if status in ["REVISAR", "WARNING", "ADVERTENCIA"]:
         return "REVISAR"
 
     if warnings > 0:
         return "REVISAR"
 
-    # PRIORIDAD 4: ESTADO CORRECTO
     if status in ["OK", "NORMAL", "CORRECTO"]:
         return "OK"
 
@@ -418,9 +462,7 @@ st.markdown("""
 with st.sidebar:
 
     st.markdown("## 📡 GOTTA MONITOR")
-
     st.markdown("---")
-
     st.markdown("### 📍 Navegación")
 
     st.markdown("""
@@ -439,9 +481,7 @@ with st.sidebar:
 
     st.markdown("---")
 
-    st.caption(
-        "Sistema de consulta de reportes diarios"
-    )
+    st.caption("Sistema de consulta de reportes diarios")
 
 
 # ==================================================
@@ -456,9 +496,54 @@ st.markdown(
 col1, col2 = st.columns(2)
 
 
-# BUSQUEDA EN GMAIL
+# ==================================================
+# AUTORIZACION Y BUSQUEDA EN GMAIL
+# ==================================================
 
 with col1:
+
+    if st.session_state.get("gmail_oauth_error"):
+        st.error(
+            "Error de autorización Gmail: "
+            + st.session_state["gmail_oauth_error"]
+        )
+
+    if not st.session_state.get("gmail_authorized", False):
+
+        if get_authorization_url is not None:
+
+            if st.button(
+                "🔐 Autorizar Gmail",
+                use_container_width=True
+            ):
+
+                try:
+                    auth_url = get_authorization_url()
+                    st.session_state["gmail_auth_url"] = auth_url
+
+                except Exception as error:
+                    st.error(
+                        f"No fue posible iniciar la autorización: {error}"
+                    )
+
+            if st.session_state.get("gmail_auth_url"):
+
+                st.link_button(
+                    "Continuar con Google",
+                    st.session_state["gmail_auth_url"],
+                    use_container_width=True
+                )
+
+        else:
+
+            st.info(
+                "La autorización web de Gmail todavía no está "
+                "configurada en gmail_helper.py."
+            )
+
+    else:
+
+        st.success("Gmail autorizado en esta sesión.")
 
     if st.button(
         "📧 Obtener reporte",
@@ -469,6 +554,12 @@ with col1:
 
             try:
 
+                if find_latest_xlsx is None:
+                    raise RuntimeError(
+                        "No se encontró la función find_latest_xlsx "
+                        "en gmail_helper.py."
+                    )
+
                 result = find_latest_xlsx(
                     query="has:attachment filename:xlsx"
                 )
@@ -476,12 +567,8 @@ with col1:
                 if result:
 
                     if isinstance(result, tuple):
-
-                        file_name = result[0]
-                        file_bytes = result[1]
-
+                        file_name, file_bytes = result
                     else:
-
                         file_name = "Reporte_DADDS.xlsx"
                         file_bytes = result
 
@@ -491,26 +578,21 @@ with col1:
                     st.session_state["report_bytes"] = file_bytes
                     st.session_state["report_name"] = file_name
 
-                    st.success(
-                        f"Reporte cargado: {file_name}"
-                    )
-
+                    st.success(f"Reporte cargado: {file_name}")
                     st.rerun()
 
                 else:
-
-                    st.warning(
-                        "No se encontró ningún reporte."
-                    )
+                    st.warning("No se encontró ningún reporte.")
 
             except Exception as error:
-
                 st.error(
                     f"No fue posible conectar o buscar: {error}"
                 )
 
 
+# ==================================================
 # CARGA MANUAL
+# ==================================================
 
 with col2:
 
@@ -534,7 +616,9 @@ with col2:
             st.rerun()
 
 
+# ==================================================
 # LIMPIAR REPORTE
+# ==================================================
 
 if st.button("🗑️ Limpiar reporte"):
 
@@ -565,10 +649,7 @@ if "report_bytes" in st.session_state:
 
     except Exception as error:
 
-        st.error(
-            f"Error al leer el archivo Excel: {error}"
-        )
-
+        st.error(f"Error al leer el archivo Excel: {error}")
         st.stop()
 
     if df is not None and not df.empty:
@@ -624,7 +705,7 @@ if "report_bytes" in st.session_state:
         )
 
         # ==========================================
-        # CLASIFICACION UNIFICADA
+        # CLASIFICACION
         # ==========================================
 
         df["Clasificacion_DADDS"] = df.apply(
@@ -668,32 +749,14 @@ if "report_bytes" in st.session_state:
             (df["Clasificacion_DADDS"] == "SIN CLASIFICAR").sum()
         )
 
-        # Indicadores
         metric1, metric2, metric3, metric4 = st.columns(4)
 
-        metric1.metric(
-            "TOTAL ESTACIONES",
-            total_stations
-        )
+        metric1.metric("TOTAL ESTACIONES", total_stations)
+        metric2.metric("ESTADO OK", ok_count)
+        metric3.metric("ESTADO REVISAR", review_count)
+        metric4.metric("ESTADO ERROR", error_count)
 
-        metric2.metric(
-            "ESTADO OK",
-            ok_count
-        )
-
-        metric3.metric(
-            "ESTADO REVISAR",
-            review_count
-        )
-
-        metric4.metric(
-            "ESTADO ERROR",
-            error_count
-        )
-
-        # Mostrar pendientes solamente si existen
         if unknown_count > 0:
-
             st.info(
                 f"Hay {unknown_count} estaciones sin información "
                 "suficiente para clasificarlas."
@@ -741,10 +804,7 @@ if "report_bytes" in st.session_state:
                 key="filtro_estado"
             )
 
-        # Aplicar filtros
         df_filtrado = df.copy()
-
-        # FILTRO POR NOMBRE
 
         if buscar_estacion.strip():
 
@@ -758,8 +818,6 @@ if "report_bytes" in st.session_state:
                     regex=False
                 )
             ]
-
-        # FILTRO POR CLASIFICACION
 
         if estado_seleccionado != "Todos":
 
@@ -805,9 +863,7 @@ if "report_bytes" in st.session_state:
         )
 
         estaciones_consulta = (
-            df_filtrado
-            if not df_filtrado.empty
-            else df
+            df_filtrado if not df_filtrado.empty else df
         )
 
         station_names = sorted(
@@ -824,11 +880,7 @@ if "report_bytes" in st.session_state:
                 st.session_state.get("estacion_individual")
                 not in station_names
             ):
-
-                st.session_state.pop(
-                    "estacion_individual",
-                    None
-                )
+                st.session_state.pop("estacion_individual", None)
 
             selected_station = st.selectbox(
                 "Selecciona una estación para consultar sus datos",
@@ -840,9 +892,7 @@ if "report_bytes" in st.session_state:
                 df[station_col].astype(str) == selected_station
             ].iloc[0]
 
-            st.markdown(
-                f"### 📍 {selected_station}"
-            )
+            st.markdown(f"### 📍 {selected_station}")
 
             # ======================================
             # INDICADORES INDIVIDUALES
@@ -873,17 +923,13 @@ if "report_bytes" in st.session_state:
                     if pd.isna(value):
                         value = "Sin información"
 
-                    st.metric(
-                        label,
-                        str(value)
-                    )
+                    st.metric(label, str(value))
 
             if detail_col is not None:
 
                 detail_value = station_row[detail_col]
 
                 if pd.notna(detail_value):
-
                     st.info(
                         f"Observación registrada en el reporte: "
                         f"{detail_value}"
@@ -901,7 +947,6 @@ if "report_bytes" in st.session_state:
                     normalize_text(fix_encoding(sheet))
                     == normalize_text(selected_station)
                 ):
-
                     matching_sheet = sheet
                     break
 
@@ -913,11 +958,11 @@ if "report_bytes" in st.session_state:
                 )
 
                 station_data = station_data.dropna(how="all")
-
                 station_data = fix_column_names(station_data)
 
-                # Corregir textos
-                for column in station_data.select_dtypes(include=["object"]).columns:
+                for column in station_data.select_dtypes(
+                    include=["object"]
+                ).columns:
 
                     station_data[column] = station_data[column].apply(
                         fix_encoding
@@ -987,7 +1032,10 @@ if "report_bytes" in st.session_state:
                             "Selecciona las variables que deseas visualizar",
                             numeric_columns,
                             default=numeric_columns[:1],
-                            key=f"variables_{normalize_text(selected_station)}"
+                            key=(
+                                "variables_"
+                                + normalize_text(selected_station)
+                            )
                         )
 
                         for variable in selected_variables:
@@ -1099,3 +1147,4 @@ st.divider()
 st.caption(
     "Gotta Monitor | Sistema de monitoreo de estaciones hidrológicas"
 )
+
