@@ -1,37 +1,35 @@
 
 import base64
+import json
 import streamlit as st
 
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
+from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 
 
-def get_oauth_config():
-    return {
+def create_flow(state=None):
+    config = {
         "web": {
             "client_id": st.secrets["google"]["client_id"],
             "client_secret": st.secrets["google"]["client_secret"],
             "auth_uri": "https://accounts.google.com/o/oauth2/auth",
             "token_uri": "https://oauth2.googleapis.com/token",
-            "redirect_uris": [
-                st.secrets["google"]["redirect_uri"]
-            ],
+            "redirect_uris": [st.secrets["google"]["redirect_uri"]],
         }
     }
 
-
-def create_flow():
     flow = Flow.from_client_config(
-        get_oauth_config(),
-        scopes=SCOPES
+        config,
+        scopes=SCOPES,
+        state=state
     )
 
     flow.redirect_uri = st.secrets["google"]["redirect_uri"]
-
     return flow
 
 
@@ -49,16 +47,19 @@ def get_authorization_url():
     return auth_url
 
 
-def exchange_code(code, state):
-    flow = create_flow()
+def exchange_code(code, returned_state):
+    expected_state = st.session_state.get("oauth_state")
 
-    flow.fetch_token(
-        code=code
-    )
+    if not expected_state or returned_state != expected_state:
+        raise ValueError("Estado OAuth inválido. Intenta autorizar nuevamente.")
+
+    flow = create_flow(state=expected_state)
+    flow.fetch_token(code=code)
 
     creds = flow.credentials
 
     st.session_state["gmail_credentials"] = creds.to_json()
+    st.session_state.pop("oauth_state", None)
 
     return creds
 
@@ -70,16 +71,16 @@ def get_credentials():
         return None
 
     creds = Credentials.from_authorized_user_info(
-        eval(token_json),
+        json.loads(token_json),
         SCOPES
     )
 
     if creds.expired and creds.refresh_token:
-        from google.auth.transport.requests import Request
-
         creds.refresh(Request())
-
         st.session_state["gmail_credentials"] = creds.to_json()
+
+    if not creds.valid:
+        return None
 
     return creds
 
@@ -100,10 +101,8 @@ def gmail_service():
 def find_latest_xlsx(query):
     service = gmail_service()
 
-    if not service:
-        raise RuntimeError(
-            "Debes autorizar tu cuenta de Gmail primero."
-        )
+    if service is None:
+        raise RuntimeError("Primero debes autorizar Gmail.")
 
     result = service.users().messages().list(
         userId="me",
@@ -117,7 +116,6 @@ def find_latest_xlsx(query):
         return None
 
     def inspect_parts(msg_id, parts):
-
         for part in parts or []:
 
             filename = part.get("filename", "")
@@ -144,10 +142,7 @@ def find_latest_xlsx(query):
                     data = attachment.get("data")
 
                 if data:
-                    file_bytes = base64.urlsafe_b64decode(
-                        data.encode("UTF-8")
-                    )
-
+                    file_bytes = base64.urlsafe_b64decode(data)
                     return filename, file_bytes
 
             found = inspect_parts(
@@ -161,18 +156,13 @@ def find_latest_xlsx(query):
         return None
 
     for msg in messages:
-
         detail = service.users().messages().get(
             userId="me",
             id=msg["id"]
         ).execute()
 
         payload = detail.get("payload", {})
-
-        parts = payload.get("parts")
-
-        if not parts:
-            parts = [payload]
+        parts = payload.get("parts") or [payload]
 
         found = inspect_parts(
             msg["id"],
