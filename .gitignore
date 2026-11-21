@@ -1,0 +1,15 @@
+
+# Credenciales y autorizacion Gmail
+credentials.json
+token.json
+
+# Entorno virtual de Python
+.venv/
+
+# Archivos temporales
+__pycache__/
+*.pyc
+
+# Archivos de construccion
+build/
+dist/
